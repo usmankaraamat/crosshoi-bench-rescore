@@ -71,10 +71,35 @@ for s in ("S1", "S3"):
 json.dump({f"{k[0]}|{k[1]}|{k[2]}": {kk: v for kk, v in r.items() if kk != "per_q"} for k, r in res.items()},
           open(os.path.join(HERE, "results_variants.json"), "w"), indent=1)
 
-# ---- 4. bootstrap CI for the best fair variant vs paper rule (S1, instance F1) ----
+# ---- 4. bootstrap CIs (S1, question-level, 1,000 resamples) ----
+# Individual intervals for the "both changes" variant, plus paired intervals for the change
+# against the released selection. Individual intervals overlapping another model's interval
+# does NOT show equivalence; no paired test against the VLM is possible without its per-question outputs.
+BOTH = "+ rank within target person"   # = label fix + target-matched top-5
 rng = np.random.default_rng(0)
-for m in ("ADA-CM", "HOLa"):
-    a = res[("S1", "paper (image top-5)", m)]["per_q"]; b = res[("S1", "options, k = #GT (oracle)", m)]["per_q"]
-    keys = list(a); A = np.array([a[k][0] for k in keys]); B = np.array([b[k][0] for k in keys])
-    boots = [100 * B[i].mean() for i in (rng.integers(0, len(keys), len(keys)) for _ in range(1000))]
-    print(f"S1 {m} inst-F1 oracle-k: {100*B.mean():.2f}  95% CI [{np.percentile(boots,2.5):.2f}, {np.percentile(boots,97.5):.2f}]")
+for m in ("ADA-CM", "HOLa", "CMMP"):
+    a = res[("S1", "paper (image top-5)", m)]["per_q"]; b = res[("S1", BOTH, m)]["per_q"]
+    keys = list(a)
+    A = np.array([a[k] for k in keys], float); B = np.array([b[k] for k in keys], float)   # cols: inst-F1, exact
+    idx = [rng.integers(0, len(keys), len(keys)) for _ in range(1000)]
+    ci = lambda v: (np.percentile(v, 2.5), np.percentile(v, 97.5))
+    lo, hi = ci([100 * B[i, 0].mean() for i in idx])
+    dlo, dhi = ci([100 * (B[i, 0] - A[i, 0]).mean() for i in idx])
+    elo, ehi = ci([100 * (B[i, 1] - A[i, 1]).mean() for i in idx])
+    print(f"S1 {m:7s} both changes: inst-F1 {100*B[:,0].mean():.2f} CI [{lo:.2f}, {hi:.2f}] | "
+          f"change vs released: inst-F1 {100*(B[:,0]-A[:,0]).mean():+.2f} [{dlo:+.2f}, {dhi:+.2f}], "
+          f"EM-per-question {100*(B[:,1]-A[:,1]).mean():+.2f} [{elo:+.2f}, {ehi:+.2f}]")
+
+# ---- 5. duplicate labels (the released scorer does not de-duplicate answer lists) ----
+print()
+for s, kw in (("S1", dict(k=5, fix_noint=True)), ("S1", dict(k=5, fix_noint=True, rank_within="target"))):
+    for m in ("ADA-CM", "HOLa"):
+        x = run(s, m, **kw); y = run(s, m, dedup=True, **kw)
+        print(f"{s} {m:7s} {kw}: macro/inst/micro/EM {x['macro']:.2f}/{x['inst']:.2f}/{x['micro']:.2f}/{x['em']:.2f}"
+              f"  -> de-duplicated {y['macro']:.2f}/{y['inst']:.2f}/{y['micro']:.2f}/{y['em']:.2f}")
+
+# ---- 6. CMD-SE coverage ----
+bench, preds = load("S1", "CMD-SE")
+miss = [f for f in bench if f not in preds]
+print(f"\nCMD-SE released predictions missing {len(miss)} of {len(bench)} benchmark images; "
+      f"{sum(any('no_interaction' in g for g in bench[f]['gt_choices']) for f in miss)} of them have no_interaction as a correct answer (S1)")
